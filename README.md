@@ -18,6 +18,45 @@ came back around 35-65 ms each, versus 0.2 ms on the other two.
 
 If you just want the recommendation: on hardware this small, use Postgres.
 
+## Update: I doubled the box to 2 CPU / 4 GB
+
+The 2 GB verdict was "SurrealDB falls over." So I reran everything with two cores and 4 GB to
+see how much of that was just starvation. Turns out most of it was. Full numbers in
+[RESULTS-2cpu-4gb.md](RESULTS-2cpu-4gb.md); here's the short of it.
+
+The write wedge is gone. With a second core, SurrealDB loaded all 10M rows without a single
+stall, where at 2 GB it hung before 1M every time. Compaction gets its own CPU now instead of
+fighting the writer. It's still slow, about 15k rows/s against Postgres's ~425k, but it
+finishes.
+
+Then it walked straight into a new wall: **building the `user_id` index on 10M rows got
+OOM-killed**, even with 4 GB. So you can load the data and you can't index it, which for a real
+workload is nearly the same problem one step later.
+
+| 10M rows | PostgreSQL | MySQL | SurrealDB |
+|---|---|---|---|
+| Load | 22.2 s | 50.6 s | 668.7 s (no wedge) |
+| Build index | 6.7 s | 17.8 s | OOM-killed |
+| PK lookup | 0.18 ms | 0.20 ms | 33 ms |
+| Secondary lookup | 0.28 ms | 0.34 ms | 5,190 ms (no index) |
+| Full-scan agg | 761 ms | 1,883 ms | 20,600 ms |
+| On disk | 1034 MB | 593 MB | 986 MB |
+
+Two corrections to my earlier writeup, in fairness to SurrealDB:
+
+- Its RocksDB cache scales with the cgroup. At 2 GB it self-limited to a 16 MB block cache; at
+  4 GB it took 1 GB. That's why point lookups improved from ~48-65 ms to 33 ms. Still ~170x
+  behind the SQL pair, because 1 GB doesn't hold much of a 10M-row table, but the tiny cache
+  at 2 GB was self-inflicted, not something I set.
+- The storage bloat I complained about was an artifact. At 573k uncompacted rows it looked like
+  ~540 B/row. At a real 10M it compacts to ~99 B/row, right next to Postgres. I was wrong there.
+
+Bottom line moved from "it breaks" to "it works, in a different weight class." Loads finish,
+reads are correct, the wedge is gone. You still pay 30x on load and 170x on point reads, and
+you can't build a secondary index on 10M inside 4 GB. Postgres stayed the boring, fast default.
+
+Everything below is the original 2 GB / 1 CPU run.
+
 ## Setup
 
 - Host: a remote Docker engine (16 vCPU / 32 GB), with each database boxed into its own limits.
